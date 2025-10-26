@@ -5,29 +5,44 @@
 #
 import os
 import json
+import boto3
 from dotenv import load_dotenv
 
 # --- LOAD ENV VARS FIRST ---
 load_dotenv()
 # --- END LOAD ENV ---
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import (
+    FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect,
+    UploadFile, File, Form
+)
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
-from typing import Optional, List # <-- Import List
-
+from typing import Optional, List, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
 # Import our schemas and helper functions
 from schemas import (
     RagQueryInput, RagQueryOutput,
     CreateCaseInput, CreateCaseOutput,
-    InsurerDecisionInput # <-- ADD THIS LINE
+    InsurerDecisionInput
 )
 from aws_services import retrieve_from_knowledge_base, invoke_claude_agent
 import dynamo_helpers
 
+# Import the WebSocket manager
+from websocket_manager import manager
+
 # Get Knowledge Base IDs from environment
 PROVIDER_KB_ID = os.getenv("PROVIDER_KB_ID")
 INSURER_KB_ID = os.getenv("INSURER_KB_ID")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1") # Get region for boto3
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME") # For patient records
+
+# --- BOTO3 Clients ---
+# We initialize these clients with the region to avoid NoRegionError
+sfn_client = boto3.client('stepfunctions', region_name=AWS_REGION)
+s3_client = boto3.client('s3', region_name=AWS_REGION)
+STEP_FUNCTION_ARN = os.getenv("STEP_FUNCTION_ARN")
 
 if not all([PROVIDER_KB_ID, INSURER_KB_ID]):
     print("Error: PROVIDER_KB_ID or INSURER_KB_ID is not set in .env file.")
@@ -36,6 +51,19 @@ app = FastAPI(
     title="Pre-Authorization RAG Agent",
     description="API for managing and analyzing medical pre-authorization cases using Bedrock RAG.",
     version="0.1.0"
+)
+origins = [
+    "http://localhost:5173", # Your frontend's address
+    "http://localhost",
+    "http://127.0.0.1",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"], # Allows all headers
 )
 
 # --- Global Exception Handler ---
@@ -67,7 +95,8 @@ async def create_and_analyze_case(request: CreateCaseInput):
     3. Retrieves from Insurer KB for policy rules.
     4. Sends *all relevant policy chunks* and *all* filtered clinical notes to the Claude agent.
     5. Updates the case in DynamoDB with the result.
-    6. Returns the final analysis.
+    6. Broadcasts the result via WebSocket.
+    7. Returns the final analysis.
     """
 
     # --- Step 1: Create PENDING case in DynamoDB ---
@@ -140,7 +169,6 @@ async def create_and_analyze_case(request: CreateCaseInput):
         )
 
         final_status = analysis_json.get("status", "AGENT_ERROR")
-
         analysis_payload = analysis_json.get("analysis", analysis_json)
 
         # --- Step 4: Update case in DynamoDB with final analysis ---
@@ -156,8 +184,31 @@ async def create_and_analyze_case(request: CreateCaseInput):
 
         print(f"[{case_id}] Process complete.")
 
-        # Convert Decimals back to floats/ints for the API response
-        return json.loads(json.dumps(updated_item, default=str))
+        # Convert Decimals back to floats/ints for API and WebSocket
+        final_case_data = json.loads(json.dumps(updated_item, default=str))
+
+        # --- AGENTIC BROADCAST ---
+        try:
+            # Decide which channel to send the update to
+            final_status = final_case_data.get("status")
+            provider_channel = f"provider-{final_case_data.get('provider_id')}"
+            
+            if final_status == "MISSING_INFORMATION":
+                # Push the "fix this" task to the doctor
+                await manager.broadcast(provider_channel, final_case_data)
+                
+            elif final_status == "APPROVED_READY":
+                # Push the "review this" task to the insurer queue
+                await manager.broadcast("insurer-queue", final_case_data)
+                # Also notify the doctor that it's ready
+                await manager.broadcast(provider_channel, final_case_data)
+                
+        except Exception as e:
+            # Don't fail the HTTP request if WebSocket fails
+            print(f"[{case_id}] FAILED to broadcast WebSocket update: {e}")
+        # --- END BROADCAST ---
+
+        return final_case_data
 
     except Exception as e:
         # If anything fails, log the error to the case in DynamoDB
@@ -170,7 +221,6 @@ async def create_and_analyze_case(request: CreateCaseInput):
             policy_context="",
             clinical_context=""
         )
-
         # Re-raise the exception so the user gets a 500 error
         raise
 
@@ -188,7 +238,7 @@ async def get_case_status(case_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- THIS IS THE NEW ENDPOINT ---
+
 @app.get("/get-cases-by-patient/{patient_id}", response_model=List[CreateCaseOutput], summary="Get Cases by Patient ID", tags=["Cases"])
 async def get_cases_by_patient(patient_id: str):
     """
@@ -206,8 +256,108 @@ async def get_cases_by_patient(patient_id: str):
         # This will catch errors from dynamo_helpers, e.g., if the GSI is missing
         print(f"Error querying for patient_id {patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred while querying for patient cases: {e}")
-# --- END NEW ENDPOINT ---
 
+
+# --- NEW ENDPOINTS FOR INSURER DASHBOARD ---
+
+@app.get("/get-cases-by-status/{status}", response_model=List[CreateCaseOutput], summary="Get Cases by Status (for Insurer)", tags=["Insurer"])
+async def get_cases_by_status_endpoint(status: str):
+    """
+    Retrieves a list of all cases with a specific status.
+    (e.g., 'APPROVED_READY' for the insurer work queue)
+    
+    This requires the 'status-index' GSI on the DynamoDB table.
+    """
+    try:
+        case_list = await run_in_threadpool(dynamo_helpers.get_cases_by_status, status=status)
+        return case_list
+    except Exception as e:
+        print(f"Error querying for status {status}: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred while querying for cases: {e}")
+
+@app.post("/submit-decision", response_model=CreateCaseOutput, summary="Submit Final Insurer Decision", tags=["Insurer"])
+async def submit_insurer_decision(request: InsurerDecisionInput):
+    """
+    Allows an insurer to submit a final 'APPROVED' or 'DENIED' decision,
+    which updates the case in DynamoDB and notifies the doctor.
+    """
+    try:
+        updated_item = await run_in_threadpool(
+            dynamo_helpers.update_case_decision,
+            case_id=request.case_id,
+            final_status=request.decision,
+            insurer_notes=request.notes
+        )
+        
+        # --- AGENTIC BROADCAST (Close the loop) ---
+        try:
+            # Send the final decision back to the doctor
+            provider_channel = f"provider-{updated_item.get('provider_id')}"
+            await manager.broadcast(provider_channel, updated_item)
+        except Exception as e:
+            # Don't fail the HTTP request if WebSocket fails
+            print(f"[{updated_item.get('case_id')}] FAILED to broadcast decision: {e}")
+        # --- END BROADCAST ---
+
+        return updated_item
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- NEW ENDPOINT FOR S3 UPLOAD ---
+
+@app.post("/upload-patient-record", summary="Upload Patient PDF to S3", tags=["Patients"])
+async def upload_patient_record(
+    patient_id: str = Form(...),
+    patient_file: UploadFile = File(...)
+):
+    """
+    Uploads a patient's PDF record to the S3 bucket for the Knowledge Base.
+    Also uploads the required .metadata.json file.
+    """
+    if not S3_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="S3_BUCKET_NAME is not configured.")
+
+    # 1. Upload the PDF
+    pdf_filename = f"{patient_id}_{patient_file.filename}"
+    try:
+        s3_client.upload_fileobj(
+            patient_file.file,
+            S3_BUCKET_NAME,
+            pdf_filename
+        )
+        print(f"Successfully uploaded file: {pdf_filename}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload PDF: {e}")
+
+    # 2. Upload the Metadata file (CRITICAL)
+    metadata_filename = f"{pdf_filename}.metadata.json"
+    metadata_content = {
+        "metadataAttributes": {
+            "patient_id": patient_id
+        }
+    }
+    
+    try:
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=metadata_filename,
+            Body=json.dumps(metadata_content),
+            ContentType='application/json'
+        )
+        print(f"Successfully uploaded metadata: {metadata_filename}")
+    except Exception as e:
+        # Don't leave an orphaned PDF
+        s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=pdf_filename)
+        raise HTTPException(status_code=500, detail=f"Failed to upload metadata: {e}")
+
+    return {"status": "success", "filename": pdf_filename}
+
+
+# --- TEST ENDPOINTS ---
 
 @app.post("/query/provider", response_model=RagQueryOutput, summary="Query Provider KB (Test)", tags=["RAG Query"])
 async def query_provider_kb_endpoint(request: RagQueryInput):
@@ -234,36 +384,26 @@ async def query_insurer_kb_endpoint(request: RagQueryInput):
     response = await run_in_threadpool(retrieve_from_knowledge_base, kb_id=INSURER_KB_ID, query=request.query)
     return response
 
-@app.get("/get-cases-by-status/{status}", response_model=List[CreateCaseOutput], summary="Get Cases by Status (for Insurer)", tags=["Insurer"])
-async def get_cases_by_status_endpoint(status: str):
-    """
-    Retrieves a list of all cases with a specific status.
-    (e.g., 'APPROVED_READY' for the insurer work queue)
-    
-    This requires the 'status-index' GSI on the DynamoDB table.
-    """
-    try:
-        case_list = await run_in_threadpool(dynamo_helpers.get_cases_by_status, status=status)
-        return case_list
-    except Exception as e:
-        print(f"Error querying for status {status}: {e}")
-        raise HTTPException(status_code=500, detail=f"An error occurred while querying for cases: {e}")
 
-@app.post("/submit-decision", response_model=CreateCaseOutput, summary="Submit Final Insurer Decision", tags=["Insurer"])
-async def submit_insurer_decision(request: InsurerDecisionInput):
+# --- WEBSOCKET ENDPOINT ---
+
+@app.websocket("/ws/{channel_id}")
+async def websocket_endpoint(websocket: WebSocket, channel_id: str):
     """
-    Allows an insurer to submit a final 'APPROVED' or 'DENIED' decision,
-    which updates the case in DynamoDB.
+    Main WebSocket connection endpoint.
+    Clients connect here and "subscribe" to a channel.
+    
+    - Doctors should connect to: "provider-{provider_id}" (e.g., "provider-doctor@example.com")
+    - Insurers should connect to: "insurer-queue"
     """
+    await manager.connect(channel_id, websocket)
     try:
-        updated_item = await run_in_threadpool(
-            dynamo_helpers.update_case_decision,
-            case_id=request.case_id,
-            final_status=request.decision,
-            insurer_notes=request.notes
-        )
-        return updated_item
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        while True:
+            # Keep the connection alive
+            # In a real app, you might receive pings/pongs
+            await websocket.receive_text() 
+    except WebSocketDisconnect:
+        manager.disconnect(channel_id, websocket)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"WebSocket Error: {e}")
+        manager.disconnect(channel_id, websocket)
