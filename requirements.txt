@@ -1,0 +1,14 @@
+# Core server framework
+fastapi
+
+# ASGI server to run FastAPI
+uvicorn[standard]
+
+# AWS SDK for Python
+boto3
+
+# For data validation and API schemas
+pydantic
+
+# For loading environment variables from a .env file
+python-dotenv
