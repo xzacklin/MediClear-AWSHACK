@@ -19,7 +19,8 @@ from typing import Optional, List # <-- Import List
 # Import our schemas and helper functions
 from schemas import (
     RagQueryInput, RagQueryOutput,
-    CreateCaseInput, CreateCaseOutput
+    CreateCaseInput, CreateCaseOutput,
+    InsurerDecisionInput # <-- ADD THIS LINE
 )
 from aws_services import retrieve_from_knowledge_base, invoke_claude_agent
 import dynamo_helpers
@@ -232,3 +233,37 @@ async def query_insurer_kb_endpoint(request: RagQueryInput):
 
     response = await run_in_threadpool(retrieve_from_knowledge_base, kb_id=INSURER_KB_ID, query=request.query)
     return response
+
+@app.get("/get-cases-by-status/{status}", response_model=List[CreateCaseOutput], summary="Get Cases by Status (for Insurer)", tags=["Insurer"])
+async def get_cases_by_status_endpoint(status: str):
+    """
+    Retrieves a list of all cases with a specific status.
+    (e.g., 'APPROVED_READY' for the insurer work queue)
+    
+    This requires the 'status-index' GSI on the DynamoDB table.
+    """
+    try:
+        case_list = await run_in_threadpool(dynamo_helpers.get_cases_by_status, status=status)
+        return case_list
+    except Exception as e:
+        print(f"Error querying for status {status}: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred while querying for cases: {e}")
+
+@app.post("/submit-decision", response_model=CreateCaseOutput, summary="Submit Final Insurer Decision", tags=["Insurer"])
+async def submit_insurer_decision(request: InsurerDecisionInput):
+    """
+    Allows an insurer to submit a final 'APPROVED' or 'DENIED' decision,
+    which updates the case in DynamoDB.
+    """
+    try:
+        updated_item = await run_in_threadpool(
+            dynamo_helpers.update_case_decision,
+            case_id=request.case_id,
+            final_status=request.decision,
+            insurer_notes=request.notes
+        )
+        return updated_item
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

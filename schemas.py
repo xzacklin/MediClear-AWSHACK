@@ -4,7 +4,7 @@
 # This file contains all Pydantic models for API request/response validation.
 #
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any # <-- Import 'Any'
+from typing import List, Optional, Dict, Any, Literal # <-- Import 'Any'
 
 # --- RAG Query Models ---
 
@@ -60,3 +60,10 @@ class CreateCaseOutput(BaseModel):
     
     policy_context: Optional[str] = None
     clinical_context: Optional[str] = None
+class InsurerDecisionInput(BaseModel):
+    """
+    Data needed for an insurer to make a final decision.
+    """
+    case_id: str
+    decision: Literal['APPROVED', 'DENIED'] # Enforces a specific value
+    notes: Optional[str] = "No notes provided."

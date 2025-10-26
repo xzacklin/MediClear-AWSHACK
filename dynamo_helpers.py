@@ -189,3 +189,79 @@ def get_cases_by_patient_id(patient_id: str) -> List[dict]:
         print("Please ensure a GSI with IndexName='patient_id-index' and PartitionKey='patient_id' exists.")
         raise
 # --- END NEW FUNCTION ---
+
+def get_cases_by_status(status: str) -> List[dict]:
+    """
+    Retrieves a list of cases for a specific status.
+    
+    *** NOTE: This function requires the 'status-index' GSI ***
+    """
+    if not table:
+        raise ValueError("DynamoDB table is not initialized.")
+        
+    GSI_NAME = 'status-index' 
+        
+    try:
+        response = table.query(
+            IndexName=GSI_NAME,
+            KeyConditionExpression=Key('status').eq(status)
+        )
+        items = response.get('Items', [])
+        
+        result_items = []
+        for item in items:
+            result_items.append(
+                json.loads(json.dumps(item, cls=DecimalEncoder), parse_float=float)
+            )
+            
+        print(f"Found {len(result_items)} cases with status: {status}")
+        return result_items
+        
+    except Exception as e:
+        # This will often fail if the GSI 'status-index' doesn't exist
+        print(f"Error querying cases for status {status}: {e}")
+        print("Please ensure a GSI with IndexName='status-index' and PartitionKey='status' exists.")
+        raise
+
+# --- NEW FUNCTION FOR INSURER DECISION ---
+def update_case_decision(case_id: str, final_status: str, insurer_notes: str) -> dict:
+    """
+    Allows the insurer to make a final decision (APPROVED or DENIED).
+    """
+    if not table:
+        raise ValueError("DynamoDB table is not initialized.")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        response = table.update_item(
+            Key={'case_id': case_id},
+            # --- FIX ---
+            # We are no longer using 'map_merge'.
+            # Instead, we set the specific keys *inside* the 'analysis' map.
+            UpdateExpression=(
+                "SET #s = :s, last_updated = :lu, "
+                "#a.#notes = :n, "  # Sets 'analysis.insurer_decision_notes'
+                "#a.#ts = :ts"      # Sets 'analysis.insurer_decision_at'
+            ),
+            ExpressionAttributeNames={
+                '#s': 'status',
+                '#a': 'analysis',
+                '#notes': 'insurer_decision_notes', # Key for the notes
+                '#ts': 'insurer_decision_at'       # Key for the timestamp
+            },
+            ExpressionAttributeValues={
+                ':s': final_status,
+                ':lu': timestamp,
+                ':n': insurer_notes, # Pass the notes string directly
+                ':ts': timestamp    # Pass the timestamp string directly
+            },
+            # --- END FIX ---
+            ReturnValues="ALL_NEW"
+        )
+        print(f"Successfully updated case: {case_id} with final decision: {final_status}")
+        # Convert Decimals back to floats/ints for JSON response
+        return json.loads(json.dumps(response.get('Attributes'), cls=DecimalEncoder), parse_float=float)
+    except Exception as e:
+        print(f"Error updating final decision for case {case_id}: {e}")
+        raise
