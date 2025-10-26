@@ -14,7 +14,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
-from typing import Optional
+from typing import Optional, List # <-- Import List
 
 # Import our schemas and helper functions
 from schemas import (
@@ -64,7 +64,7 @@ async def create_and_analyze_case(request: CreateCaseInput):
     1. Creates a new case in DynamoDB (Status: PENDING).
     2. Retrieves from Provider KB for clinical notes, *filtered by patient_id*.
     3. Retrieves from Insurer KB for policy rules.
-    4. Sends *only the most relevant policy chunk* and *all* filtered clinical notes to the Claude agent.
+    4. Sends *all relevant policy chunks* and *all* filtered clinical notes to the Claude agent.
     5. Updates the case in DynamoDB with the result.
     6. Returns the final analysis.
     """
@@ -86,7 +86,6 @@ async def create_and_analyze_case(request: CreateCaseInput):
         # This query is simpler, as the filter will do the precise matching
         clinical_query = f"Clinical notes for patient {request.patient_id} related to {request.procedure_code}."
 
-        # --- THIS IS THE NEW LOGIC ---
         # Create the exact metadata filter for the Provider KB
         clinical_filter = {
             "equals": {
@@ -107,14 +106,15 @@ async def create_and_analyze_case(request: CreateCaseInput):
             patient_filter=clinical_filter # <-- Pass the filter here
         )
 
-        # Instead of joining all chunks, take only the text from the FIRST policy chunk.
+        # Join ALL relevant policy chunks to get the full section
         if policy_rag_result.source_chunks:
-            policy_context = policy_rag_result.source_chunks[0].text
-            print(f"[{case_id}] Using TOP policy chunk: {policy_context[:200]}...") # Log first 200 chars
+            policy_context = "\n".join([chunk.text for chunk in policy_rag_result.source_chunks])
+            print(f"[{case_id}] Using ALL policy chunks: {policy_context[:200]}...") # Log first 200 chars
         else:
             policy_context = "" # Handle case where no policy chunks are found
 
-        
+        # We concatenate all clinical chunks, as they are now guaranteed
+        # to be *only* for the correct patient due to the metadata filter.
         clinical_context = "\n".join([chunk.text for chunk in clinical_rag_result.source_chunks])
 
         if not policy_context or not clinical_context:
@@ -186,6 +186,26 @@ async def get_case_status(case_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- THIS IS THE NEW ENDPOINT ---
+@app.get("/get-cases-by-patient/{patient_id}", response_model=List[CreateCaseOutput], summary="Get Cases by Patient ID", tags=["Cases"])
+async def get_cases_by_patient(patient_id: str):
+    """
+    Retrieves a list of all cases associated with a specific patient_id.
+    
+    This requires a 'patient_id-index' GSI on the DynamoDB table.
+    """
+    try:
+        case_list = await run_in_threadpool(dynamo_helpers.get_cases_by_patient_id, patient_id=patient_id)
+        if not case_list:
+            # Return an empty list, which is valid, but good to know
+            print(f"No cases found for patient: {patient_id}")
+        return case_list
+    except Exception as e:
+        # This will catch errors from dynamo_helpers, e.g., if the GSI is missing
+        print(f"Error querying for patient_id {patient_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred while querying for patient cases: {e}")
+# --- END NEW ENDPOINT ---
 
 
 @app.post("/query/provider", response_model=RagQueryOutput, summary="Query Provider KB (Test)", tags=["RAG Query"])

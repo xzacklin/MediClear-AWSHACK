@@ -10,6 +10,8 @@ import json
 from decimal import Decimal
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from typing import List # <-- Import List
+from boto3.dynamodb.conditions import Key # <-- Import Key
 
 # --- LOAD ENV VARS ---
 load_dotenv()
@@ -146,3 +148,44 @@ def get_case(case_id: str) -> dict:
     except Exception as e:
         print(f"Error getting case {case_id}: {e}")
         raise
+
+# --- THIS IS THE NEW FUNCTION ---
+def get_cases_by_patient_id(patient_id: str) -> List[dict]:
+    """
+    Retrieves a list of cases for a specific patient_id.
+    
+    *** NOTE: This function requires a Global Secondary Index (GSI) ***
+    *** on the DynamoDB table. The GSI must:                     ***
+    *** - Have an Index name (e.g., 'patient_id-index')         ***
+    *** - Use 'patient_id' as its Partition Key (HASH)          ***
+    """
+    if not table:
+        raise ValueError("DynamoDB table is not initialized.")
+        
+    # We will assume the GSI is named 'patient_id-index'
+    # This must be created in your DynamoDB console.
+    GSI_NAME = 'patient_id-index' 
+        
+    try:
+        response = table.query(
+            IndexName=GSI_NAME,
+            KeyConditionExpression=Key('patient_id').eq(patient_id)
+        )
+        items = response.get('Items', [])
+        
+        # Convert Decimals back to floats/ints for JSON response
+        result_items = []
+        for item in items:
+            result_items.append(
+                json.loads(json.dumps(item, cls=DecimalEncoder), parse_float=float)
+            )
+            
+        print(f"Found {len(result_items)} cases for patient_id: {patient_id}")
+        return result_items
+        
+    except Exception as e:
+        # This will often fail if the GSI 'patient_id-index' doesn't exist
+        print(f"Error querying cases for patient_id {patient_id}: {e}")
+        print("Please ensure a GSI with IndexName='patient_id-index' and PartitionKey='patient_id' exists.")
+        raise
+# --- END NEW FUNCTION ---
