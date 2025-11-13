@@ -1,5 +1,5 @@
-**#MediClear - AWS Hackathon**
-**#Project Description**
+#MediClear - AWS Hackathon**
+#Project Description**
 This project is a FastAPI backend designed to automate medical pre-authorization requests. It functions as an analysis agent that uses AWS Bedrock and a Retrieval-Augmented Generation (RAG) pipeline to compare patient clinical notes against insurer policy criteria.
 
 The system ingests a request, retrieves relevant documents from two separate Bedrock Knowledge Bases (one for provider notes, one for insurer policy), and uses a language model to perform a detailed analysis. The result is a structured JSON object that determines if the request is approved, needs more information, or is denied, based on the evidence.
