@@ -1,6 +1,3 @@
-#
-# prompts.py
-#
 PRE_AUTH_SYSTEM_PROMPT = """
 You are a meticulous, automated medical pre-authorization analysis tool.
 Your job is to analyze a request for a specific procedure: <Procedure_Requested>{procedure_code}</Procedure_Requested>

@@ -1,8 +1,5 @@
-#
-# dynamo_helpers.py
-#
+
 # This file handles all communication with the DynamoDB table.
-#
 import os
 import boto3
 import uuid
@@ -10,8 +7,8 @@ import json
 from decimal import Decimal
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from typing import List # <-- Import List
-from boto3.dynamodb.conditions import Key # <-- Import Key
+from typing import List 
+from boto3.dynamodb.conditions import Key 
 
 # --- LOAD ENV VARS ---
 load_dotenv()
@@ -79,11 +76,10 @@ def create_new_case(patient_id: str, provider_id: str, procedure_code: str) -> d
         print(f"Error creating case in DynamoDB: {e}")
         raise
 
-# --- THIS FUNCTION IS UPDATED ---
 def update_case_with_analysis(
     case_id: str, 
     status: str, 
-    analysis_payload: dict, # Renamed from analysis_json
+    analysis_payload: dict, 
     policy_context: str, 
     clinical_context: str
 ) -> dict:
@@ -112,7 +108,7 @@ def update_case_with_analysis(
             },
             ExpressionAttributeValues={
                 ':s': status,
-                ':a': analysis_decimal, # This now saves the correct, unwrapped object
+                ':a': analysis_decimal,
                 ':pc': policy_context,
                 ':cc': clinical_context,
                 ':lu': timestamp
@@ -124,7 +120,7 @@ def update_case_with_analysis(
     except Exception as e:
         print(f"Error updating case {case_id} in DynamoDB: {e}")
         raise
-# --- END UPDATE ---
+
 
 def get_case(case_id: str) -> dict:
     """
@@ -149,7 +145,6 @@ def get_case(case_id: str) -> dict:
         print(f"Error getting case {case_id}: {e}")
         raise
 
-# --- THIS IS THE NEW FUNCTION ---
 def get_cases_by_patient_id(patient_id: str) -> List[dict]:
     """
     Retrieves a list of cases for a specific patient_id.
@@ -162,8 +157,7 @@ def get_cases_by_patient_id(patient_id: str) -> List[dict]:
     if not table:
         raise ValueError("DynamoDB table is not initialized.")
         
-    # We will assume the GSI is named 'patient_id-index'
-    # This must be created in your DynamoDB console.
+   
     GSI_NAME = 'patient_id-index' 
         
     try:
@@ -184,11 +178,9 @@ def get_cases_by_patient_id(patient_id: str) -> List[dict]:
         return result_items
         
     except Exception as e:
-        # This will often fail if the GSI 'patient_id-index' doesn't exist
         print(f"Error querying cases for patient_id {patient_id}: {e}")
         print("Please ensure a GSI with IndexName='patient_id-index' and PartitionKey='patient_id' exists.")
         raise
-# --- END NEW FUNCTION ---
 
 def get_cases_by_status(status: str) -> List[dict]:
     """
@@ -218,12 +210,10 @@ def get_cases_by_status(status: str) -> List[dict]:
         return result_items
         
     except Exception as e:
-        # This will often fail if the GSI 'status-index' doesn't exist
         print(f"Error querying cases for status {status}: {e}")
         print("Please ensure a GSI with IndexName='status-index' and PartitionKey='status' exists.")
         raise
 
-# --- NEW FUNCTION FOR INSURER DECISION ---
 def update_case_decision(case_id: str, final_status: str, insurer_notes: str) -> dict:
     """
     Allows the insurer to make a final decision (APPROVED or DENIED).
@@ -236,9 +226,6 @@ def update_case_decision(case_id: str, final_status: str, insurer_notes: str) ->
     try:
         response = table.update_item(
             Key={'case_id': case_id},
-            # --- FIX ---
-            # We are no longer using 'map_merge'.
-            # Instead, we set the specific keys *inside* the 'analysis' map.
             UpdateExpression=(
                 "SET #s = :s, last_updated = :lu, "
                 "#a.#notes = :n, "  # Sets 'analysis.insurer_decision_notes'
@@ -256,7 +243,6 @@ def update_case_decision(case_id: str, final_status: str, insurer_notes: str) ->
                 ':n': insurer_notes, # Pass the notes string directly
                 ':ts': timestamp    # Pass the timestamp string directly
             },
-            # --- END FIX ---
             ReturnValues="ALL_NEW"
         )
         print(f"Successfully updated case: {case_id} with final decision: {final_status}")

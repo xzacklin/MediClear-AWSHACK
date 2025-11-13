@@ -8,9 +8,7 @@ import json
 import boto3
 from dotenv import load_dotenv
 
-# --- LOAD ENV VARS FIRST ---
 load_dotenv()
-# --- END LOAD ENV ---
 
 from fastapi import (
     FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect,
@@ -39,7 +37,6 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1") # Get region for boto3
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME") # For patient records
 
 # --- BOTO3 Clients ---
-# We initialize these clients with the region to avoid NoRegionError
 sfn_client = boto3.client('stepfunctions', region_name=AWS_REGION)
 s3_client = boto3.client('s3', region_name=AWS_REGION)
 STEP_FUNCTION_ARN = os.getenv("STEP_FUNCTION_ARN")
@@ -53,7 +50,7 @@ app = FastAPI(
     version="0.1.0"
 )
 origins = [
-    "http://localhost:5173", # Your frontend's address
+    "http://localhost:5173", 
     "http://localhost",
     "http://127.0.0.1",
 ]
@@ -62,8 +59,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --- Global Exception Handler ---
@@ -113,10 +110,8 @@ async def create_and_analyze_case(request: CreateCaseInput):
         # --- Step 2: Run RAG retrievals in parallel (in threadpool) ---
         print(f"[{case_id}] Running RAG retrievals...")
         policy_query = f"What are the medical necessity criteria for {request.procedure_code}?"
-        # This query is simpler, as the filter will do the precise matching
         clinical_query = f"Clinical notes for patient {request.patient_id} related to {request.procedure_code}."
 
-        # Create the exact metadata filter for the Provider KB
         clinical_filter = {
             "equals": {
                 "key": "patient_id",
@@ -163,7 +158,7 @@ async def create_and_analyze_case(request: CreateCaseInput):
 
         analysis_json = await run_in_threadpool(
             invoke_claude_agent,
-            policy_context=policy_context, # Pass the CLEAN context
+            policy_context=policy_context, 
             clinical_context=clinical_context,
             procedure_code=request.procedure_code
         )
@@ -187,7 +182,6 @@ async def create_and_analyze_case(request: CreateCaseInput):
         # Convert Decimals back to floats/ints for API and WebSocket
         final_case_data = json.loads(json.dumps(updated_item, default=str))
 
-        # --- AGENTIC BROADCAST ---
         try:
             # Decide which channel to send the update to
             final_status = final_case_data.get("status")
@@ -206,7 +200,7 @@ async def create_and_analyze_case(request: CreateCaseInput):
         except Exception as e:
             # Don't fail the HTTP request if WebSocket fails
             print(f"[{case_id}] FAILED to broadcast WebSocket update: {e}")
-        # --- END BROADCAST ---
+
 
         return final_case_data
 
@@ -258,7 +252,6 @@ async def get_cases_by_patient(patient_id: str):
         raise HTTPException(status_code=500, detail=f"An error occurred while querying for patient cases: {e}")
 
 
-# --- NEW ENDPOINTS FOR INSURER DASHBOARD ---
 
 @app.get("/get-cases-by-status/{status}", response_model=List[CreateCaseOutput], summary="Get Cases by Status (for Insurer)", tags=["Insurer"])
 async def get_cases_by_status_endpoint(status: str):
@@ -289,7 +282,6 @@ async def submit_insurer_decision(request: InsurerDecisionInput):
             insurer_notes=request.notes
         )
         
-        # --- AGENTIC BROADCAST (Close the loop) ---
         try:
             # Send the final decision back to the doctor
             provider_channel = f"provider-{updated_item.get('provider_id')}"
@@ -297,7 +289,6 @@ async def submit_insurer_decision(request: InsurerDecisionInput):
         except Exception as e:
             # Don't fail the HTTP request if WebSocket fails
             print(f"[{updated_item.get('case_id')}] FAILED to broadcast decision: {e}")
-        # --- END BROADCAST ---
 
         return updated_item
         
@@ -307,7 +298,6 @@ async def submit_insurer_decision(request: InsurerDecisionInput):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- NEW ENDPOINT FOR S3 UPLOAD ---
 
 @app.post("/upload-patient-record", summary="Upload Patient PDF to S3", tags=["Patients"])
 async def upload_patient_record(
@@ -333,7 +323,7 @@ async def upload_patient_record(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload PDF: {e}")
 
-    # 2. Upload the Metadata file (CRITICAL)
+    # 2. Upload the Metadata file
     metadata_filename = f"{pdf_filename}.metadata.json"
     metadata_content = {
         "metadataAttributes": {
@@ -399,8 +389,6 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: str):
     await manager.connect(channel_id, websocket)
     try:
         while True:
-            # Keep the connection alive
-            # In a real app, you might receive pings/pongs
             await websocket.receive_text() 
     except WebSocketDisconnect:
         manager.disconnect(channel_id, websocket)

@@ -1,6 +1,4 @@
-#
-# schemas.py
-#
+
 # This file contains all Pydantic models for API request/response validation.
 #
 from pydantic import BaseModel
@@ -50,14 +48,7 @@ class CreateCaseOutput(BaseModel):
     status: str
     created_at: str
     last_updated: str
-    
-    # --- THIS IS THE FIX ---
-    # We are changing 'Dict[str, CaseAnalysisDetail]' to 'Dict[str, Any]'.
-    # This tells Pydantic that 'analysis' can be ANY object,
-    # including our '{"error": "..."}' object.
     analysis: Optional[Dict[str, Any]] = None
-    # --- END FIX ---
-    
     policy_context: Optional[str] = None
     clinical_context: Optional[str] = None
 class InsurerDecisionInput(BaseModel):
